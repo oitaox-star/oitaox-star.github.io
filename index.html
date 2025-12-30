@@ -2,21 +2,64 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>WebAR (Pattern) + Touch</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+  <title>WebAR + UI (Scale/Rotate/Animation)</title>
 
+  <!-- A-Frame -->
   <script src="https://aframe.io/releases/1.6.0/aframe.min.js"></script>
+  <!-- AR.js -->
   <script src="https://raw.githack.com/AR-js-org/AR.js/master/aframe/build/aframe-ar.js"></script>
+  <!-- Gesture detector -->
   <script src="https://cdn.jsdelivr.net/gh/c-frame/aframe-gesture-detector-component@master/dist/aframe-gesture-detector-component.min.js"></script>
 
   <style>
+    body{margin:0; overflow:hidden; font-family:system-ui, -apple-system, "Noto Sans JP", sans-serif;}
+    .ui {
+      position: fixed; left: 10px; top: 10px; z-index: 9999;
+      width: min(360px, calc(100vw - 20px));
+      background: rgba(0,0,0,.55);
+      color: #fff;
+      border: 1px solid rgba(255,255,255,.18);
+      border-radius: 14px;
+      padding: 10px 12px;
+      backdrop-filter: blur(8px);
+    }
+    .ui h2{font-size:14px; margin:0 0 8px; font-weight:700;}
+    .row{display:flex; gap:8px; align-items:center; margin:8px 0;}
+    .row label{font-size:12px; opacity:.9; width:86px; flex:0 0 86px;}
+    .row input[type="range"]{flex:1}
+    .btns{display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;}
+    button{
+      appearance:none; border:1px solid rgba(255,255,255,.22);
+      background: rgba(255,255,255,.10);
+      color:#fff; border-radius: 12px;
+      padding: 8px 10px; font-size:12px; cursor:pointer;
+    }
+    button:active{transform: translateY(1px);}
+    select{
+      width:100%; padding:8px 10px; border-radius: 12px;
+      border:1px solid rgba(255,255,255,.22);
+      background: rgba(0,0,0,.25); color:#fff;
+      outline:none;
+    }
+    .hint{font-size:11px; opacity:.8; line-height:1.4; margin-top:6px;}
+    .badge{
+      display:inline-block; font-size:11px; padding:2px 8px; border-radius:999px;
+      border:1px solid rgba(255,255,255,.22); background: rgba(255,255,255,.10);
+      margin-left:6px;
+    }
     .loader{
       position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
-      background:#000c; color:#fff; font-family:system-ui; z-index:9999;
+      background:#000c; color:#fff; z-index:9998;
+      font-size:14px;
     }
   </style>
 
   <script>
+    /**
+     * 既存のタッチ操作(ドラッグ回転/ピンチ拡大縮小)を維持
+     * UI操作とぶつかりにくいように、UI上でのタッチは A-Frame 側に流れないようにする（後述）
+     */
     AFRAME.registerComponent('gesture-handler', {
       schema: {
         minScale: { default: 0.3 },
@@ -33,6 +76,7 @@
         };
         this.onOneFingerMove = this.onOneFingerMove.bind(this);
         this.onTwoFingerMove = this.onTwoFingerMove.bind(this);
+
         el.sceneEl.addEventListener('onefingermove', this.onOneFingerMove);
         el.sceneEl.addEventListener('twofingermove', this.onTwoFingerMove);
       },
@@ -56,42 +100,319 @@
       }
     });
 
-    // デバッグ：マーカー検出イベントを表示
+    /**
+     * UIからモデルを制御するコンポーネント
+     * - scale / rotation / auto-rotate
+     * - glTF animation (Mixer)
+     * - animation clip select / play/pause / speed
+     */
+    AFRAME.registerComponent('model-ui-controller', {
+      schema: {
+        minScale: { default: 0.1 },
+        maxScale: { default: 5.0 }
+      },
+      init: function () {
+        this.mixer = null;
+        this.activeAction = null;
+        this.clips = [];
+        this.clock = new THREE.Clock();
+        this.isPlaying = false;
+        this.speed = 1.0;
+        this.autoRotate = false;
+
+        // 初期値
+        const obj = this.el.object3D;
+        this.base = {
+          scale: obj.scale.x || 1,
+          rotX: obj.rotation.x,
+          rotY: obj.rotation.y,
+          rotZ: obj.rotation.z
+        };
+
+        // UI参照
+        this.ui = {
+          scale: document.getElementById('ui-scale'),
+          rotY: document.getElementById('ui-roty'),
+          rotX: document.getElementById('ui-rotx'),
+          rotZ: document.getElementById('ui-rotz'),
+          autoRotate: document.getElementById('ui-autorotate'),
+          reset: document.getElementById('ui-reset'),
+
+          animSelect: document.getElementById('ui-anim-select'),
+          animPlay: document.getElementById('ui-anim-play'),
+          animStop: document.getElementById('ui-anim-stop'),
+          animSpeed: document.getElementById('ui-anim-speed'),
+          animStatus: document.getElementById('ui-anim-status'),
+          animWrap: document.getElementById('ui-anim-wrap')
+        };
+
+        // イベント：モデル読み込み
+        this.el.addEventListener('model-loaded', (e) => {
+          const mesh = e.detail.model; // THREE.Object3D
+          this._setupAnimations(mesh);
+          this._syncUIFromModel();
+          document.getElementById('loader').style.display = 'none';
+        });
+
+        this.el.addEventListener('model-error', (e) => {
+          console.error('model-error', e);
+          alert('model.glb の読み込みに失敗しました。パスやファイル破損を確認してください。');
+        });
+
+        // UIイベント
+        this._bindUI();
+      },
+
+      tick: function () {
+        // auto-rotate（マーカー見えてる時のみ）
+        if (this.autoRotate && this.el.object3D.visible) {
+          this.el.object3D.rotation.y += 0.01;
+          // UI側も追従させる（重くならないように小数は丸め）
+          if (this.ui.rotY) this.ui.rotY.value = (this.el.object3D.rotation.y).toFixed(3);
+        }
+
+        // animation update
+        if (this.mixer && this.isPlaying && this.el.object3D.visible) {
+          const dt = this.clock.getDelta();
+          this.mixer.update(dt * this.speed);
+        } else {
+          // マーカー外れ中にclockが進みすぎないように
+          this.clock.getDelta();
+        }
+      },
+
+      _bindUI: function () {
+        const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
+
+        // UI上のタッチがAR操作に伝播しないように止める
+        const uiRoot = document.getElementById('ui');
+        ['touchstart','touchmove','touchend','pointerdown','pointermove','pointerup'].forEach(ev=>{
+          uiRoot.addEventListener(ev, (e)=> e.stopPropagation(), {passive:false});
+        });
+
+        // Scale
+        this.ui.scale.addEventListener('input', () => {
+          const s = clamp(parseFloat(this.ui.scale.value), this.data.minScale, this.data.maxScale);
+          this.el.object3D.scale.set(s,s,s);
+        });
+
+        // Rotation sliders
+        this.ui.rotX.addEventListener('input', () => this.el.object3D.rotation.x = parseFloat(this.ui.rotX.value));
+        this.ui.rotY.addEventListener('input', () => this.el.object3D.rotation.y = parseFloat(this.ui.rotY.value));
+        this.ui.rotZ.addEventListener('input', () => this.el.object3D.rotation.z = parseFloat(this.ui.rotZ.value));
+
+        // Auto rotate
+        this.ui.autoRotate.addEventListener('change', () => {
+          this.autoRotate = this.ui.autoRotate.checked;
+        });
+
+        // Reset
+        this.ui.reset.addEventListener('click', () => {
+          this.el.object3D.scale.set(this.base.scale, this.base.scale, this.base.scale);
+          this.el.object3D.rotation.set(this.base.rotX, this.base.rotY, this.base.rotZ);
+          this._syncUIFromModel();
+        });
+
+        // Animation select
+        this.ui.animSelect.addEventListener('change', () => {
+          const idx = parseInt(this.ui.animSelect.value, 10);
+          this._playClipByIndex(idx);
+        });
+
+        // Play / Pause
+        this.ui.animPlay.addEventListener('click', () => {
+          if (!this.mixer || !this.activeAction) return;
+          this.isPlaying = true;
+          this.activeAction.paused = false;
+          this.activeAction.play();
+          this._setAnimStatus('再生中');
+        });
+
+        // Stop (reset to start)
+        this.ui.animStop.addEventListener('click', () => {
+          if (!this.mixer || !this.activeAction) return;
+          this.isPlaying = false;
+          this.activeAction.stop();
+          // 先頭フレームへ
+          this.mixer.setTime(0);
+          this._setAnimStatus('停止');
+        });
+
+        // Speed
+        this.ui.animSpeed.addEventListener('input', () => {
+          this.speed = parseFloat(this.ui.animSpeed.value);
+          document.getElementById('ui-anim-speed-val').textContent = this.speed.toFixed(2) + 'x';
+        });
+      },
+
+      _syncUIFromModel: function () {
+        const obj = this.el.object3D;
+        this.ui.scale.value = obj.scale.x;
+        this.ui.rotX.value = obj.rotation.x;
+        this.ui.rotY.value = obj.rotation.y;
+        this.ui.rotZ.value = obj.rotation.z;
+      },
+
+      _setupAnimations: function (mesh) {
+        // glTF animations は A-Frame の gltf-model が読み込んだ model に入ることが多い
+        // ただし A-Frame の実装/素材によって e.detail.model.animations or mesh.animations の場合あり
+        const animations = mesh.animations || (mesh.userData && mesh.userData.gltfExtensions && []) || [];
+        // A-Frame/three側で animations が無い場合でも、el.getObject3D('mesh') 側を覗く
+        const object3D = this.el.getObject3D('mesh');
+        const clips = (object3D && object3D.animations && object3D.animations.length) ? object3D.animations
+                    : (animations && animations.length) ? animations
+                    : [];
+
+        this.clips = clips;
+
+        // UIへ反映
+        const select = this.ui.animSelect;
+        select.innerHTML = ''; // reset
+
+        if (!this.clips.length) {
+          this.ui.animWrap.style.display = 'none';
+          return;
+        }
+
+        this.ui.animWrap.style.display = 'block';
+
+        this.mixer = new THREE.AnimationMixer(object3D || mesh);
+
+        this.clips.forEach((clip, i) => {
+          const opt = document.createElement('option');
+          opt.value = i;
+          opt.textContent = clip.name ? clip.name : `Animation ${i+1}`;
+          select.appendChild(opt);
+        });
+
+        // 最初のアニメを自動選択して停止状態で準備
+        this._playClipByIndex(0, /*autoplay*/ false);
+        this._setAnimStatus('停止（選択済み）');
+      },
+
+      _playClipByIndex: function (index, autoplay = true) {
+        if (!this.mixer || !this.clips.length) return;
+
+        const clip = this.clips[index];
+        if (!clip) return;
+
+        // 既存アクション停止
+        if (this.activeAction) {
+          this.activeAction.stop();
+        }
+
+        this.activeAction = this.mixer.clipAction(clip);
+        this.activeAction.reset();
+        this.activeAction.clampWhenFinished = true;
+        this.activeAction.loop = THREE.LoopRepeat;
+
+        // 再生/停止
+        if (autoplay) {
+          this.isPlaying = true;
+          this.activeAction.play();
+          this._setAnimStatus('再生中');
+        } else {
+          this.isPlaying = false;
+          this.activeAction.play();
+          this.activeAction.paused = true; // 準備だけ
+        }
+
+        // 先頭へ
+        this.mixer.setTime(0);
+      },
+
+      _setAnimStatus: function (text) {
+        if (this.ui.animStatus) this.ui.animStatus.textContent = text;
+      }
+    });
+
+    // マーカー検出でロード表示を消す（モデルがまだでもヒント用）
     window.addEventListener('DOMContentLoaded', () => {
-      const loader = document.getElementById('loader');
       const marker = document.getElementById('marker');
+      const loader = document.getElementById('loader');
       marker.addEventListener('markerFound', () => {
-        console.log('markerFound');
-        loader.style.display = 'none';
+        // モデル読込完了は model-loaded 側で消すが、ここでヒント更新してもOK
+        loader.textContent = 'モデル読み込み中…';
       });
       marker.addEventListener('markerLost', () => {
-        console.log('markerLost');
+        // 必要なら何か表示したい場合に使える
       });
-
-      // モデル読み込み失敗を拾う
-      const model = document.getElementById('model');
-      model.addEventListener('model-error', (e) => console.error('model-error', e));
-      model.addEventListener('model-loaded', () => console.log('model-loaded'));
     });
   </script>
 </head>
 
-<body style="margin:0; overflow:hidden;">
+<body>
   <div id="loader" class="loader">Loading…（カメラ許可→マーカーを映してください）</div>
 
+  <!-- UIオーバーレイ -->
+  <div id="ui" class="ui">
+    <h2>モデル操作UI <span class="badge">AR</span></h2>
+
+    <div class="row">
+      <label>サイズ</label>
+      <input id="ui-scale" type="range" min="0.1" max="5.0" step="0.01" value="1.0" />
+    </div>
+
+    <div class="row">
+      <label>回転X</label>
+      <input id="ui-rotx" type="range" min="-3.1416" max="3.1416" step="0.01" value="0" />
+    </div>
+    <div class="row">
+      <label>回転Y</label>
+      <input id="ui-roty" type="range" min="-3.1416" max="3.1416" step="0.01" value="0" />
+    </div>
+    <div class="row">
+      <label>回転Z</label>
+      <input id="ui-rotz" type="range" min="-3.1416" max="3.1416" step="0.01" value="0" />
+    </div>
+
+    <div class="row">
+      <label>自動回転</label>
+      <input id="ui-autorotate" type="checkbox" />
+    </div>
+
+    <div class="btns">
+      <button id="ui-reset" type="button">リセット</button>
+    </div>
+
+    <!-- アニメUI：アニメがある時だけ表示 -->
+    <div id="ui-anim-wrap" style="margin-top:10px; display:none;">
+      <div style="font-size:12px; margin:6px 0 6px; font-weight:700;">アニメーション</div>
+      <select id="ui-anim-select"></select>
+
+      <div class="btns" style="margin-top:8px;">
+        <button id="ui-anim-play" type="button">再生</button>
+        <button id="ui-anim-stop" type="button">停止</button>
+        <span style="font-size:12px; opacity:.85; align-self:center;">状態：<span id="ui-anim-status">-</span></span>
+      </div>
+
+      <div class="row" style="margin-top:10px;">
+        <label>速度</label>
+        <input id="ui-anim-speed" type="range" min="0.1" max="3.0" step="0.05" value="1.0" />
+      </div>
+      <div class="hint">速度：<span id="ui-anim-speed-val">1.00x</span> / ※GLBにアニメが無い場合、この欄は表示されません。</div>
+    </div>
+
+    <div class="hint" style="margin-top:10px;">
+      ・画面タッチ：ドラッグ回転／ピンチ拡大縮小（UI外で操作）<br>
+      ・UIのつまみ：正確な調整用
+    </div>
+  </div>
+
+  <!-- A-Frame Scene -->
   <a-scene
     embedded
     gesture-detector
     vr-mode-ui="enabled: false"
     renderer="logarithmicDepthBuffer: true; precision: medium;"
-    arjs="trackingMethod: best; sourceType: webcam; debugUIEnabled: true;"
+    arjs="trackingMethod: best; sourceType: webcam; debugUIEnabled: false;"
   >
     <a-assets>
       <a-asset-item id="model-asset" src="assets/model.glb"></a-asset-item>
     </a-assets>
 
     <a-marker id="marker" type="pattern" url="assets/marker.patt" emitevents="true">
-      <!-- ライト追加（見えない対策） -->
+      <!-- 見えない対策（ライト） -->
       <a-entity light="type: ambient; intensity: 1.0"></a-entity>
       <a-entity light="type: directional; intensity: 0.8" position="1 2 1"></a-entity>
 
@@ -102,6 +423,7 @@
         rotation="0 0 0"
         scale="1 1 1"
         gesture-handler
+        model-ui-controller
       ></a-entity>
     </a-marker>
 
