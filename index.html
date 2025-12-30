@@ -4,30 +4,108 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>WebAR - File Swap Version</title>
+
+    <!-- A-Frame 本体 -->
     <script src="https://aframe.io/releases/1.4.2/aframe.min.js"></script>
+
+    <!-- AR.js for A-Frame -->
     <script src="https://raw.githack.com/AR-js-org/AR.js/master/aframe/build/aframe-ar.js"></script>
+
+    <!-- gesture-detector コンポーネント -->
+    <script src="https://cdn.jsdelivr.net/gh/c-frame/aframe-gesture-detector-component@master/dist/aframe-gesture-detector-component.min.js"></script>
+
+    <!-- 回転・拡大縮小用コンポーネント -->
+    <script>
+      AFRAME.registerComponent('gesture-handler', {
+        schema: {
+          minScale: {default: 0.3},
+          maxScale: {default: 3.0}
+        },
+
+        init: function () {
+          const el = this.el;
+
+          this.internalState = {
+            rotation: {
+              x: el.object3D.rotation.x,
+              y: el.object3D.rotation.y
+            },
+            scale: el.object3D.scale.x || 1
+          };
+
+          this.handleOneFingerMove = this.handleOneFingerMove.bind(this);
+          this.handleTwoFingerMove = this.handleTwoFingerMove.bind(this);
+
+          // シーン全体のジェスチャーを監視
+          el.sceneEl.addEventListener('onefingermove', this.handleOneFingerMove);
+          el.sceneEl.addEventListener('twofingermove', this.handleTwoFingerMove);
+        },
+
+        remove: function () {
+          this.el.sceneEl.removeEventListener('onefingermove', this.handleOneFingerMove);
+          this.el.sceneEl.removeEventListener('twofingermove', this.handleTwoFingerMove);
+        },
+
+        // 1本指ドラッグ：回転
+        handleOneFingerMove: function (event) {
+          // マーカーが外れているときは無視
+          if (!this.el.object3D.visible) return;
+
+          const d = event.detail.positionChange; // {x, y} ピクセル変化量
+
+          this.internalState.rotation.y += d.x * 0.01; // 左右ドラッグでY軸回転
+          this.internalState.rotation.x += d.y * 0.01; // 上下ドラッグでX軸回転
+
+          this.el.object3D.rotation.set(
+            this.internalState.rotation.x,
+            this.internalState.rotation.y,
+            0
+          );
+        },
+
+        // 2本指ピンチ：拡大縮小
+        handleTwoFingerMove: function (event) {
+          if (!this.el.object3D.visible) return;
+
+          const spreadChange = event.detail.spreadChange; // 2本指の距離変化
+
+          this.internalState.scale += spreadChange * 0.005;
+          this.internalState.scale = Math.min(
+            this.data.maxScale,
+            Math.max(this.data.minScale, this.internalState.scale)
+          );
+
+          this.el.object3D.scale.set(
+            this.internalState.scale,
+            this.internalState.scale,
+            this.internalState.scale
+          );
+        }
+      });
+    </script>
 </head>
 
 <body style="margin: 0; overflow: hidden;">
 
-    <a-scene 
-        embedded 
+    <a-scene
+        embedded
         arjs="sourceType: webcam; debugUIEnabled: false;"
-        renderer="logarithmicDepthBuffer: true;">
+        renderer="logarithmicDepthBuffer: true;"
+        gesture-detector> <!-- ← ジェスチャー検出を有効化 -->
 
         <a-assets>
             <a-asset-item id="target-model" src="assets/model.glb"></a-asset-item>
         </a-assets>
 
         <a-marker type="pattern" url="assets/marker.patt">
-            
-            <a-entity 
-                gltf-model="#target-model" 
-                scale="1 1 1" 
-                position="0 0 0" 
-                rotation="0 0 0">
+            <a-entity
+                id="model"
+                gltf-model="#target-model"
+                scale="1 1 1"
+                position="0 0 0"
+                rotation="0 0 0"
+                gesture-handler> <!-- ← ここで回転＆拡大縮小を有効化 -->
             </a-entity>
-
         </a-marker>
 
         <a-entity camera></a-entity>
