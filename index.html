@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <title>アップロード式 WebAR（マーカー + 3D/画像/動画）</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+
+  <!-- A-Frame + MindAR（画像トラッキング） -->
+  <script src="https://aframe.io/releases/1.6.0/aframe.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js"></script>
+
+  <style>
+    *{box-sizing:border-box;}
+    body{
+      margin:0;
+      font-family: system-ui,"Noto Sans JP",sans-serif;
+      background:#000;
+      color:#fff;
+      overflow:hidden;
+    }
+    /* ARシーンをフルスクリーンに */
+    #ar-container{
+      position:fixed;
+      inset:0;
+    }
+    a-scene{
+      width:100%;
+      height:100%;
+    }
+
+    /* オーバーレイUI */
+    #ui{
+      position:fixed;
+      inset:0;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      pointer-events:none; /* 中の要素だけクリック許可 */
+    }
+    #ui-inner{
+      pointer-events:auto;
+      width:min(480px, 100% - 32px);
+      padding:16px 20px;
+      border-radius:12px;
+      background:rgba(0,0,0,0.82);
+      box-shadow:0 12px 40px rgba(0,0,0,0.6);
+      backdrop-filter:blur(10px);
+    }
+    h1{
+      margin:0 0 8px;
+      font-size:18px;
+    }
+    p{
+      margin:4px 0;
+      font-size:13px;
+      color:#ccc;
+    }
+    label{
+      display:block;
+      margin-top:10px;
+      font-size:13px;
+    }
+    input[type="file"], select{
+      width:100%;
+      margin-top:4px;
+      font-size:13px;
+    }
+    button{
+      margin-top:14px;
+      width:100%;
+      padding:10px 0;
+      font-size:15px;
+      border-radius:8px;
+      border:none;
+      cursor:pointer;
+      background:#ffcc66;
+      color:#222;
+      font-weight:600;
+    }
+    button:disabled{
+      background:#777;
+      cursor:not-allowed;
+    }
+    #status{
+      margin-top:6px;
+      font-size:12px;
+      color:#ffcc66;
+    }
+    #small-note{
+      margin-top:8px;
+      font-size:11px;
+      color:#aaa;
+    }
+  </style>
+</head>
+<body>
+  <!-- ARシーン（最初から読み込んでおく） -->
+  <div id="ar-container">
+    <a-scene
+      mindar-image="imageTargetSrc: ;"  <!-- 後でJSから埋める -->
+      color-space="sRGB"
+      renderer="colorManagement: true, physicallyCorrectLights: true"
+      vr-mode-ui="enabled: false"
+      device-orientation-permission-ui="enabled: false"
+      embedded
+    >
+      <a-assets>
+        <!-- アップロードされたコンテンツをここに突っ込む -->
+        <a-asset-item id="userModel"></a-asset-item>
+        <img id="userImage">
+        <video id="userVideo" loop muted playsinline webkit-playsinline></video>
+      </a-assets>
+
+      <a-camera position="0 0 0" look-controls="enabled: false"></a-camera>
+
+      <!-- マーカーが見つかった位置に表示されるエンティティ -->
+      <a-entity id="marker-root" mindar-image-target="targetIndex: 0">
+        <!-- 3Dモデル -->
+        <a-gltf-model id="modelEntity"
+          src="#userModel"
+          visible="false"
+          position="0 0 0"
+          rotation="0 0 0"
+          scale="0.1 0.1 0.1">
+        </a-gltf-model>
+
+        <!-- 平面画像 -->
+        <a-plane id="imageEntity"
+          src="#userImage"
+          visible="false"
+          position="0 0 0"
+          rotation="0 0 0"
+          width="1"
+          height="0.7">
+        </a-plane>
+
+        <!-- 動画（テクスチャとして貼る） -->
+        <a-plane id="videoEntity"
+          visible="false"
+          position="0 0 0"
+          rotation="0 0 0"
+          width="1"
+          height="0.7"
+          material="src: #userVideo">
+        </a-plane>
+      </a-entity>
+    </a-scene>
+  </div>
+
+  <!-- オーバーレイUI（ファイルアップロードなど） -->
+  <div id="ui">
+    <div id="ui-inner">
+      <h1>WebAR：マーカー + コンテンツアップロード</h1>
+      <p>① マーカー(.mind) と ② 表示したい3D / 画像 / 動画 をアップロードして「ARを開始」します。</p>
+
+      <label>1. マーカー（.mind ファイル）</label>
+      <input type="file" id="targetFile" accept=".mind">
+
+      <label>2. コンテンツの種類</label>
+      <select id="contentType">
+        <option value="model">3Dモデル（.glb / .gltf）</option>
+        <option value="image">画像（.png / .jpg / .jpeg）</option>
+        <option value="video">動画（.mp4 / .webm）</option>
+      </select>
+
+      <label>3. コンテンツファイル</label>
+      <input type="file" id="contentFile"
+        accept=".glb,.gltf,.png,.jpg,.jpeg,.mp4,.webm">
+
+      <button id="startButton">ARを開始</button>
+      <div id="status"></div>
+      <div id="small-note">
+        ※ HTTPS または localhost で開いてください。<br>
+        ※ カメラ利用の許可ダイアログが出たら「許可」を押してください。<br>
+        ※ iPhone Safari / Android Chrome で動作する想定です。
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const targetInput = document.getElementById("targetFile");
+    const contentInput = document.getElementById("contentFile");
+    const contentTypeSelect = document.getElementById("contentType");
+    const startButton = document.getElementById("startButton");
+    const statusEl = document.getElementById("status");
+    const ui = document.getElementById("ui");
+
+    const sceneEl = document.querySelector("a-scene");
+    const userModelAsset = document.getElementById("userModel");
+    const userImageAsset = document.getElementById("userImage");
+    const userVideoAsset = document.getElementById("userVideo");
+
+    const modelEntity = document.getElementById("modelEntity");
+    const imageEntity = document.getElementById("imageEntity");
+    const videoEntity = document.getElementById("videoEntity");
+
+    function setStatus(msg){
+      statusEl.textContent = msg || "";
+    }
+
+    function hideAllEntities(){
+      modelEntity.setAttribute("visible", "false");
+      imageEntity.setAttribute("visible", "false");
+      videoEntity.setAttribute("visible", "false");
+    }
+
+    startButton.addEventListener("click", () => {
+      const targetFile = targetInput.files[0];
+      const contentFile = contentInput.files[0];
+      const type = contentTypeSelect.value;
+
+      if (!targetFile) {
+        setStatus("マーカー(.mind)ファイルを選択してください。");
+        return;
+      }
+      if (!contentFile) {
+        setStatus("コンテンツファイルを選択してください。");
+        return;
+      }
+
+      setStatus("ファイルを読み込み中…");
+
+      // ブラウザ内URLを作成
+      const targetUrl = URL.createObjectURL(targetFile);
+      const contentUrl = URL.createObjectURL(contentFile);
+
+      // MindAR のターゲット指定を差し替え
+      sceneEl.setAttribute("mindar-image", `imageTargetSrc: ${targetUrl}`);
+
+      // コンテンツの種類ごとに設定
+      hideAllEntities();
+
+      if (type === "model") {
+        // 3Dモデル
+        userModelAsset.setAttribute("src", contentUrl);
+        modelEntity.setAttribute("visible", "true");
+        setStatus("3Dモデルを読み込みました。マーカーをかざしてください。");
+
+      } else if (type === "image") {
+        // 画像
+        userImageAsset.setAttribute("src", contentUrl);
+        imageEntity.setAttribute("visible", "true");
+        setStatus("画像を読み込みました。マーカーをかざしてください。");
+
+      } else if (type === "video") {
+        // 動画
+        userVideoAsset.setAttribute("src", contentUrl);
+
+        // iOS 対策：ユーザー操作中に再生要求
+        userVideoAsset.play().catch(err => {
+          console.warn("動画の自動再生に失敗しました:", err);
+        });
+
+        videoEntity.setAttribute("visible", "true");
+        setStatus("動画を読み込みました。マーカーをかざしてください。");
+      }
+
+      // UIを半透明にする / 必要なら閉じる
+      ui.style.display = "none";  // 完全に消すならこれでOK
+    });
+
+    // 参考：ファイル選択時に軽くメッセージ
+    targetInput.addEventListener("change", () => {
+      if (targetInput.files[0]) {
+        setStatus(`マーカー選択: ${targetInput.files[0].name}`);
+      }
+    });
+    contentInput.addEventListener("change", () => {
+      if (contentInput.files[0]) {
+        setStatus(`コンテンツ選択: ${contentInput.files[0].name}`);
+      }
+    });
+  </script>
+</body>
+</html>
